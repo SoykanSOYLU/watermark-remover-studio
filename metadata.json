@@ -1,0 +1,6 @@
+{
+  "name": "Watermark Remover Studio",
+  "description": "Batch remove watermarks, filigrans, copyright texts, and logos from multiple JPG/PNG files simultaneously with identical naming and smart AI detection.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
