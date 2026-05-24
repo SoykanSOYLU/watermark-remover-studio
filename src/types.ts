@@ -29,4 +29,21 @@ export interface UploadedImage {
   paths: BrushPath[];
 }
 
+export interface UploadedVideo {
+  id: string;
+  name: string;
+  size: number;
+  width: number;
+  height: number;
+  mimeType: string;
+  originalUrl: string; // ObjectURL
+  processedUrl: string | null; // ObjectURL of rendered result
+  status: "idle" | "processing" | "done" | "error";
+  errorMsg?: string;
+  boxes: RectBox[];
+  paths: BrushPath[];
+  duration: number; // in seconds
+}
+
 export type ToolType = "brush" | "eraser" | "rectangle";
+

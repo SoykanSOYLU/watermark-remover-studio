@@ -10,14 +10,15 @@ Created by **nakyoS**
 
 ## 🇹🇷 Türkçe Açıklama (Turkish Overview)
 
-**ClearMark AI**, fotoğraflarınızdaki filigranları (watermark), logoları ve istenmeyen nesneleri tarayıcınızda **tamamen yerel (local olarak)** ve güvenli bir şekilde temizleyen akıllı bir toplu işleme (batch) aracıdır.
+**ClearMark AI**, fotoğraflarınızdaki ve videolarınızdaki filigranları (watermark), logoları ve istenmeyen nesneleri tarayıcınızda **tamamen yerel (local olarak)** ve güvenli bir şekilde temizleyen akıllı bir medya işleme (media processing) aracıdır.
 
 ### Öne Çıkan Özellikler:
 - 🛠️ **Fırça ve Kutu Maskeleme:** Serbest çizim fırçası (Brush) veya akıllı dikdörtgen alanı (Rectangle) ile silinecek filigranı tam olarak işaretleyin.
-- ⚡ **Toplu Maske Kopyalama (Batch Clone):** Tek bir görselde belirlediğiniz filigran maskesini tek tuşla sıradaki **tüm görsellere kopyalayın**! Aynı konumda filigran barındıran yüzlerce görseli saniyeler içinde temizlemek için mükemmeldir.
+- 🎬 **Video Workspace:** Videolarınız için özel oynatma, duraklatma ve zaman çizgisinde (timeline scrubbing) kaydırma özellikleri. Filtrelenmiş kareleri HTML5 Canvas aracılığıyla sekans halinde işleyerek temiz çıktılar üretir.
+- ⚡ **Toplu Maske Kopyalama (Batch Clone):** Tek bir görselde veya videoda belirlediğiniz filigran maskesini tek tuşla sıradaki **tüm dosyalara kopyalayın**! Aynı konumda filigran barındıran yüzlerce dosyayı saniyeler içinde temizlemek için mükemmeldir.
 - 🎨 **Gece Modu (Night Mode):** Göz yorgunluğunu önleyen, koyu gri ve indigo renk paletine sahip şık gece teması ile tam uyum.
-- 🔒 **%100 Yerel Veri Güvenliği (Local Processing):** Görselleriniz **asla harici bir sunucuya yüklenmez**. Piksel iyileştirme algoritması doğrudan bilgisayarınızın işlem gücünü (HTML5 Canvas) kullanarak tarayıcı içerisinde çalışır. Orijinal dosya adlarınız ve kaliteniz korunur.
-- 📦 **Toplu İndirme (ZIP):** İşlemi biten görselleri tek tek veya orijinal dosya adları korunmuş olarak tek bir **ZIP arşivi** şeklinde indirin.
+- 🔒 **%100 Yerel Veri Güvenliği (Local Processing):** Dosyalarınız **asla harici bir sunucuya yüklenmez**. Piksel iyileştirme algoritması doğrudan bilgisayarınızın işlem gücünü (HTML5 Canvas) kullanarak tarayıcı içerisinde çalışır. Orijinal kaliteniz korunur.
+- 📦 **Toplu İndirme (ZIP):** İşlemi biten görselleri tek tek veya orijinal dosya adları korunmuş olarak tek bir **ZIP arşivi** şeklinde indirin. Videolarınızı tek tıkla doğrudan WebM formatında kayıt edin.
 
 ---
 
@@ -25,7 +26,8 @@ Created by **nakyoS**
 
 ClearMark AI is designed for professional batch editing workflows where speed, consistency, and data privacy are paramount.
 
-- **Dynamic Workspace Manager:** Upload multiple files at once. Drag, drop, toggle between previews, and manage your queue in real time.
+- **Dual Workspace Modes (Image & Video):** Seamlessly alternate between image and video files. The left interactive queue manages your queue dynamically.
+- **Micro-Recorder Engine for Video:** Captures frame buffers sequentially over drawing layers, recording pure, watermark-free streams with custom boundaries.
 - **Wavefront Propagation (Onion-Peeling) Algorithm:** Heals target areas using a fast, inverse-squared distance-weighted radial interpolation.
 - **High-Contrast Dark Canvas:** Sleek and ultra-modern user interface built with customized premium layout options.
 - **Micro-interactions:** Staggered transitions powered by `motion` for fluid feedback.
@@ -35,16 +37,18 @@ ClearMark AI is designed for professional batch editing workflows where speed, c
 
 ## 🧠 Nasıl Çalışıyor? (How does the Engine Work?)
 
-The core watermark inpainting engine is implemented entirely in pure client-side TypeScript inside `src/utils/inpainter.ts`.
+The core watermark inpainting engine is implemented entirely in pure client-side TypeScript.
 
 1. **Wavefront Propagation Phase:** 
-   The engine reads the coordinates marked in red on the Canvas. It creates a pixel frontier boundary and recursively propagates known pixels inward toward the center of the masked area.
+   The engine reads the coordinates marked on the Canvas. It creates a pixel frontier boundary and recursively propagates known pixels inward toward the center of the masked area.
 2. **Weighted Local Pixel Interpolation:**
    Pixel color calculation uses an inverse squared-distance weight function over a $7\times7$ structural neighborhood:
    $$W(d) = \frac{1}{d^2}$$
    This ensures textures transition naturally without leaving sharp edges.
 3. **Multi-Pass Spatial Smoothing:**
    After reconstruction, a 3-pass spatial smoothing filter blends boundary values to matches surrounding grain patterns perfectly.
+4. **Frame-by-Frame Video Processing:**
+   For video files, the canvas overlays are synchronised with the video viewport. The renderer captures frame states through off-screen web interfaces, applies drawing canvas mask buffers in natural loops, and leverages Node/browser `MediaRecorder` API streams to dynamically render clean video recordings without watermark layers.
 
 *Note: Since all operations execute using local CPU cycles inside your browser context, your images never leave your local workspace.*
 

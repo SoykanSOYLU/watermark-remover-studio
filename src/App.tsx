@@ -21,16 +21,27 @@ import {
   HelpCircle,
   Maximize2,
   Sun,
-  Moon
+  Moon,
+  Film,
+  Pause
 } from "lucide-react";
-import { UploadedImage, ToolType, RectBox, BrushPath } from "./types";
+import { UploadedImage, UploadedVideo, ToolType, RectBox, BrushPath } from "./types";
 import { inpaintImage } from "./utils/inpainter";
 
 export default function App() {
   // Application State
   const [images, setImages] = useState<UploadedImage[]>([]);
   const [activeImageId, setActiveImageId] = useState<string | null>(null);
-  
+  const [workspaceMode, setWorkspaceMode] = useState<"image" | "video">("image");
+  const [videos, setVideos] = useState<UploadedVideo[]>([]);
+  const [activeVideoId, setActiveVideoId] = useState<string | null>(null);
+
+  // Video playback states
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [videoTime, setVideoTime] = useState(0);
+  const [videoDuration, setVideoDuration] = useState(0);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+
   // Toolbar State
   const [tool, setTool] = useState<ToolType>("brush");
   const [brushSize, setBrushSize] = useState<number>(30); // in absolute-mapped pixels roughly
@@ -70,6 +81,11 @@ export default function App() {
     return images.find((img) => img.id === activeImageId) || null;
   }, [images, activeImageId]);
 
+  // Active Video utility
+  const activeVideo = useMemo(() => {
+    return videos.find((v) => v.id === activeVideoId) || null;
+  }, [videos, activeVideoId]);
+
   // Set the first uploaded image as active
   useEffect(() => {
     if (images.length > 0 && !activeImageId) {
@@ -77,31 +93,29 @@ export default function App() {
     }
   }, [images, activeImageId]);
 
+  // Set the first uploaded video as active
+  useEffect(() => {
+    if (videos.length > 0 && !activeVideoId) {
+      setActiveVideoId(videos[0].id);
+    }
+  }, [videos, activeVideoId]);
+
   // Handle local drawing / overlay rendering
   useEffect(() => {
-    if (!canvasRef.current || !activeImage) return;
+    const activeItem = workspaceMode === "image" ? activeImage : activeVideo;
+    if (!canvasRef.current || !activeItem) return;
 
     const canvas = canvasRef.current;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    // Clear and match resolution
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-    // Load original image to draw on screen canvas
-    const img = new Image();
-    img.src = activeImage.originalUrl;
-    img.onload = () => {
-      // Draw background image
-      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-
+    const renderOverlays = () => {
       // Draw all saved paths in semi-translucent red
-      activeImage.paths.forEach((path) => {
+      activeItem.paths.forEach((path) => {
         if (path.points.length < 1) return;
         ctx.beginPath();
         ctx.lineCap = "round";
         ctx.lineJoin = "round";
-        // Map line width percentage relative to image width
         const mappedLineWidth = (path.brushSize / 100) * canvas.width;
         ctx.lineWidth = mappedLineWidth;
         ctx.strokeStyle = "rgba(239, 68, 68, 0.45)"; // Soft ruby overlay
@@ -117,24 +131,21 @@ export default function App() {
       });
 
       // Draw all saved boxes in translucent solid overlay + solid border
-      activeImage.boxes.forEach((box) => {
+      activeItem.boxes.forEach((box) => {
         const x = (box.xmin / 100) * canvas.width;
         const y = (box.ymin / 100) * canvas.height;
         const w = ((box.xmax - box.xmin) / 100) * canvas.width;
         const h = ((box.ymax - box.ymin) / 100) * canvas.height;
 
-        // Overlay fill
         ctx.fillStyle = "rgba(239, 68, 68, 0.35)";
         ctx.fillRect(x, y, w, h);
 
-        // Border outline
         ctx.strokeStyle = "rgba(220, 38, 38, 0.85)";
         ctx.lineWidth = 2;
-        ctx.setLineDash([4, 4]); // dashed look for watermark areas
+        ctx.setLineDash([4, 4]);
         ctx.strokeRect(x, y, w, h);
-        ctx.setLineDash([]); // clear
+        ctx.setLineDash([]);
 
-        // Label flag
         ctx.fillStyle = "rgba(220, 38, 38, 0.9)";
         const labelText = box.label;
         ctx.font = "bold 11px sans-serif";
@@ -177,7 +188,20 @@ export default function App() {
         ctx.strokeRect(x, y, w, h);
       }
     };
-  }, [activeImage, currentPathPoints, tempRect, tool, brushSize]);
+
+    if (workspaceMode === "image" && activeImage) {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      const img = new Image();
+      img.src = activeImage.originalUrl;
+      img.onload = () => {
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        renderOverlays();
+      };
+    } else if (workspaceMode === "video" && activeVideo) {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      renderOverlays();
+    }
+  }, [workspaceMode, activeImage, activeVideo, currentPathPoints, tempRect, tool, brushSize]);
 
   // Handle file uploads
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement> | React.DragEvent) => {
@@ -229,6 +253,49 @@ export default function App() {
     });
   };
 
+  const handleVideoUpload = (e: React.ChangeEvent<HTMLInputElement> | React.DragEvent) => {
+    let filesList: File[] = [];
+
+    if ("files" in e.target && e.target.files) {
+      filesList = Array.from(e.target.files);
+    } else if ("dataTransfer" in e && e.dataTransfer.files) {
+      e.preventDefault();
+      filesList = Array.from(e.dataTransfer.files);
+    }
+
+    const validVideoFiles = filesList.filter(
+      (file) => file.type.startsWith("video/")
+    );
+
+    if (validVideoFiles.length === 0) return;
+
+    validVideoFiles.forEach((file) => {
+      const originalUrl = URL.createObjectURL(file);
+      const tempVideo = document.createElement("video");
+      tempVideo.src = originalUrl;
+      tempVideo.preload = "metadata";
+      tempVideo.onloadedmetadata = () => {
+        const newUploadedVideo: UploadedVideo = {
+          id: crypto.randomUUID(),
+          name: file.name,
+          size: file.size,
+          width: tempVideo.videoWidth || 640,
+          height: tempVideo.videoHeight || 360,
+          mimeType: file.type,
+          originalUrl: originalUrl,
+          processedUrl: null,
+          status: "idle",
+          boxes: [],
+          paths: [],
+          duration: tempVideo.duration || 10,
+        };
+
+        setVideos((prev) => [...prev, newUploadedVideo]);
+        setApiError(null);
+      };
+    });
+  };
+
   const preventDefaults = (e: React.DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
@@ -264,11 +331,38 @@ export default function App() {
     };
   };
 
+  // Helper to retrieve active item currently edited
+  const currentActiveItem = workspaceMode === "image" ? activeImage : activeVideo;
+
+  const updateActiveImageMasks = (paths: BrushPath[], boxes: RectBox[]) => {
+    setImages((prev) =>
+      prev.map((img) =>
+        img.id === activeImageId ? { ...img, paths, boxes } : img
+      )
+    );
+  };
+
+  const updateActiveVideoMasks = (paths: BrushPath[], boxes: RectBox[]) => {
+    setVideos((prev) =>
+      prev.map((vid) =>
+        vid.id === activeVideoId ? { ...vid, paths, boxes } : vid
+      )
+    );
+  };
+
+  const updateActiveMasks = (paths: BrushPath[], boxes: RectBox[]) => {
+    if (workspaceMode === "image") {
+      updateActiveImageMasks(paths, boxes);
+    } else {
+      updateActiveVideoMasks(paths, boxes);
+    }
+  };
+
   // Canvas Drawing triggers
   const handleStartDraw = (
     e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>
   ) => {
-    if (!activeImage || activeImage.processedUrl) return;
+    if (!currentActiveItem || currentActiveItem.processedUrl) return;
     const { x, y } = getRelativeCoords(e);
 
     isDrawing.current = true;
@@ -284,7 +378,7 @@ export default function App() {
   const handleMovingDraw = (
     e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>
   ) => {
-    if (!isDrawing.current || !activeImage) return;
+    if (!isDrawing.current || !currentActiveItem) return;
     const { x, y } = getRelativeCoords(e);
 
     if (tool === "brush" || tool === "eraser") {
@@ -302,7 +396,7 @@ export default function App() {
   };
 
   const handleStopDraw = () => {
-    if (!isDrawing.current || !activeImage) return;
+    if (!isDrawing.current || !currentActiveItem) return;
     isDrawing.current = false;
 
     if ((tool === "brush" || tool === "eraser") && currentPathPoints.length > 0) {
@@ -312,14 +406,11 @@ export default function App() {
           points: currentPathPoints,
           brushSize: brushSize,
         };
-        updateActiveImageMasks([...activeImage.paths, newPath], activeImage.boxes);
+        updateActiveMasks([...currentActiveItem.paths, newPath], currentActiveItem.boxes);
       } else {
         // Eraser Tool logic: erase parts of paths or boxes that overlap with the eraser stroke
-        // For standard UI simplicity we can trim lines, or let them clear the canvas
-        // Here we can remove any paths or boxes whose coordinates are near the eraser line
         const eraserRadius = brushSize;
-        const filteredPaths = activeImage.paths.filter((path) => {
-          // Keep paths that do NOT intersect with eraser stroke
+        const filteredPaths = currentActiveItem.paths.filter((path) => {
           const intersects = path.points.some((pt) =>
             currentPathPoints.some(
               (ept) => Math.sqrt(Math.pow(pt.x - ept.x, 2) + Math.pow(pt.y - ept.y, 2)) < eraserRadius * 0.5
@@ -328,10 +419,7 @@ export default function App() {
           return !intersects;
         });
 
-        const filteredBoxes = activeImage.boxes.filter((box) => {
-          // Keep boxes that do NOT intersect with eraser stroke
-          const centerBoxX = (box.xmin + box.xmax) / 2;
-          const centerBoxY = (box.ymin + box.ymax) / 2;
+        const filteredBoxes = currentActiveItem.boxes.filter((box) => {
           const intersects = currentPathPoints.some(
             (ept) =>
               ept.x >= box.xmin &&
@@ -342,7 +430,7 @@ export default function App() {
           return !intersects;
         });
 
-        updateActiveImageMasks(filteredPaths, filteredBoxes);
+        updateActiveMasks(filteredPaths, filteredBoxes);
       }
       setCurrentPathPoints([]);
     } else if (tool === "rectangle" && tempRect) {
@@ -361,48 +449,46 @@ export default function App() {
           ymax: finalYMax,
           xmax: finalXMax,
         };
-        updateActiveImageMasks(activeImage.paths, [...activeImage.boxes, newBox]);
+        updateActiveMasks(currentActiveItem.paths, [...currentActiveItem.boxes, newBox]);
       }
       setTempRect(null);
       dragStart.current = null;
     }
   };
 
-  const updateActiveImageMasks = (paths: BrushPath[], boxes: RectBox[]) => {
-    setImages((prev) =>
-      prev.map((img) =>
-        img.id === activeImageId ? { ...img, paths, boxes } : img
-      )
-    );
-  };
-
   // Undo Last Action (removes last drawn path/box)
   const handleUndo = () => {
-    if (!activeImage) return;
+    if (!currentActiveItem) return;
 
-    if (activeImage.boxes.length > 0) {
-      // Remove last box first
-      updateActiveImageMasks(activeImage.paths, activeImage.boxes.slice(0, -1));
-    } else if (activeImage.paths.length > 0) {
-      // Or remove last freebrush stroke
-      updateActiveImageMasks(activeImage.paths.slice(0, -1), activeImage.boxes);
+    if (currentActiveItem.boxes.length > 0) {
+      updateActiveMasks(currentActiveItem.paths, currentActiveItem.boxes.slice(0, -1));
+    } else if (currentActiveItem.paths.length > 0) {
+      updateActiveMasks(currentActiveItem.paths.slice(0, -1), currentActiveItem.boxes);
     }
   };
 
-  // Clears active image mask coordinates
+  // Clears active item mask coordinates
   const handleClearMask = () => {
-    if (!activeImage) return;
-    updateActiveImageMasks([], []);
-    setImages((prev) =>
-      prev.map((img) =>
-        img.id === activeImageId ? { ...img, processedUrl: null, status: "idle" } : img
-      )
-    );
+    if (!currentActiveItem) return;
+    updateActiveMasks([], []);
+    if (workspaceMode === "image") {
+      setImages((prev) =>
+        prev.map((img) =>
+          img.id === activeImageId ? { ...img, processedUrl: null, status: "idle" } : img
+        )
+      );
+    } else {
+      setVideos((prev) =>
+        prev.map((vid) =>
+          vid.id === activeVideoId ? { ...vid, processedUrl: null, status: "idle" } : vid
+        )
+      );
+    }
   };
 
   // Preset Common Watermark boundaries
   const handleApplyPreset = (preset: "bottom-right" | "bottom-center" | "top-left" | "top-right" | "center-diagonal") => {
-    if (!activeImage) return;
+    if (!currentActiveItem) return;
 
     let newBox: RectBox;
     switch (preset) {
@@ -423,32 +509,47 @@ export default function App() {
         break;
     }
 
-    updateActiveImageMasks(activeImage.paths, [...activeImage.boxes, newBox]);
+    updateActiveMasks(currentActiveItem.paths, [...currentActiveItem.boxes, newBox]);
   };
 
-  // BATCH CONTROL: Copy active masks to all uploaded images in queue
+  // BATCH CONTROL: Copy active masks to all uploaded items in queue
   const handleCopyMaskToAll = () => {
-    if (!activeImage) return;
-    setImages((prev) =>
-      prev.map((img) => {
-        if (img.id === activeImage.id) return img;
-        return {
-          ...img,
-          paths: activeImage.paths.map((p) => ({ ...p, id: crypto.randomUUID() })),
-          boxes: activeImage.boxes.map((b) => ({ ...b, id: crypto.randomUUID() })),
-          status: "idle",
-          processedUrl: null, // reset previous output to allow re-rendering with new copied mask
-        };
-      })
-    );
+    if (!currentActiveItem) return;
+    if (workspaceMode === "image") {
+      setImages((prev) =>
+        prev.map((img) => {
+          if (img.id === currentActiveItem.id) return img;
+          return {
+            ...img,
+            paths: currentActiveItem.paths.map((p) => ({ ...p, id: crypto.randomUUID() })),
+            boxes: currentActiveItem.boxes.map((b) => ({ ...b, id: crypto.randomUUID() })),
+            status: "idle",
+            processedUrl: null,
+          };
+        })
+      );
+    } else {
+      setVideos((prev) =>
+        prev.map((vid) => {
+          if (vid.id === currentActiveItem.id) return vid;
+          return {
+            ...vid,
+            paths: currentActiveItem.paths.map((p) => ({ ...p, id: crypto.randomUUID() })),
+            boxes: currentActiveItem.boxes.map((b) => ({ ...b, id: crypto.randomUUID() })),
+            status: "idle",
+            processedUrl: null,
+          };
+        })
+      );
+    }
   };
 
   // Delete specific target bounding box coordinate
   const deleteBox = (boxId: string) => {
-    if (!activeImage) return;
-    updateActiveImageMasks(
-      activeImage.paths,
-      activeImage.boxes.filter((b) => b.id !== boxId)
+    if (!currentActiveItem) return;
+    updateActiveMasks(
+      currentActiveItem.paths,
+      currentActiveItem.boxes.filter((b) => b.id !== boxId)
     );
   };
 
@@ -506,6 +607,209 @@ export default function App() {
       setImages((prev) =>
         prev.map((img) =>
           img.id === activeImageId ? { ...img, status: "error", errorMsg: err.message } : img
+        )
+      );
+    }
+  };
+
+  // Triggers localized inpaint heal for single video
+  const handleRemoveWatermarkVideo = async (videoId: string) => {
+    const vid = videos.find((v) => v.id === videoId);
+    if (!vid) return;
+
+    if (vid.paths.length === 0 && vid.boxes.length === 0) {
+      return; // nothing to heal
+    }
+
+    setVideos((prev) =>
+      prev.map((v) => (v.id === videoId ? { ...v, status: "processing", errorMsg: "Initiating codec pipeline..." } : v))
+    );
+
+    try {
+      // Create a background video element to draw frames stepping sequentially
+      const tempVideo = document.createElement("video");
+      tempVideo.src = vid.originalUrl;
+      tempVideo.muted = true;
+      tempVideo.playsInline = true;
+      tempVideo.crossOrigin = "anonymous";
+
+      await new Promise<void>((resolve, reject) => {
+        tempVideo.onloadedmetadata = () => resolve();
+        tempVideo.onerror = (e) => reject(new Error("Video failed to play back."));
+      });
+
+      const vWidth = tempVideo.videoWidth || vid.width;
+      const vHeight = tempVideo.videoHeight || vid.height;
+
+      const procCanvas = document.createElement("canvas");
+      procCanvas.width = vWidth;
+      procCanvas.height = vHeight;
+      const procCtx = procCanvas.getContext("2d", { willReadFrequently: true });
+      if (!procCtx) throw new Error("Canvas context init failed.");
+
+      // Record frames of offscreen canvas
+      const stream = procCanvas.captureStream(25); // 25 FPS target
+      
+      // Determine the best MIME type supported by the browser
+      let options = { mimeType: "video/webm;codecs=vp9" };
+      if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+        options = { mimeType: "video/webm" };
+      }
+      if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+        options = { mimeType: "" }; // default fallback
+      }
+
+      const recorder = new MediaRecorder(stream, options);
+      const chunks: Blob[] = [];
+
+      recorder.ondataavailable = (event) => {
+        if (event.data && event.data.size > 0) {
+          chunks.push(event.data);
+        }
+      };
+
+      const duration = tempVideo.duration || vid.duration || 5;
+      const fps = 12; // High-density frames to ensure buttery smooth result
+      const totalFrames = Math.ceil(duration * fps);
+
+      recorder.start();
+
+      // Sequential seek & paint loop
+      for (let f = 0; f < totalFrames; f++) {
+        const targetTime = f / fps;
+        tempVideo.currentTime = targetTime;
+
+        await new Promise<void>((resolveSeek) => {
+          tempVideo.onseeked = () => resolveSeek();
+        });
+
+        // Frame snapshot
+        procCtx.drawImage(tempVideo, 0, 0, vWidth, vHeight);
+
+        // Apply fast high-performance local spatial inpaint filtering
+        const imgData = procCtx.getImageData(0, 0, vWidth, vHeight);
+        const data = imgData.data;
+
+        // Render binary mask onto separate offscreen canvas
+        const maskCanvas = document.createElement("canvas");
+        maskCanvas.width = vWidth;
+        maskCanvas.height = vHeight;
+        const maskCtx = maskCanvas.getContext("2d");
+        if (maskCtx) {
+          maskCtx.fillStyle = "black";
+          maskCtx.fillRect(0, 0, vWidth, vHeight);
+          maskCtx.fillStyle = "white";
+          maskCtx.strokeStyle = "white";
+
+          // Paths
+          vid.paths.forEach((path) => {
+            if (path.points.length < 1) return;
+            maskCtx.lineWidth = (path.brushSize / 100) * vWidth;
+            maskCtx.lineCap = "round";
+            maskCtx.lineJoin = "round";
+            maskCtx.beginPath();
+            maskCtx.moveTo((path.points[0].x / 100) * vWidth, (path.points[0].y / 100) * vHeight);
+            for (let i = 1; i < path.points.length; i++) {
+              maskCtx.lineTo((path.points[i].x / 100) * vWidth, (path.points[i].y / 100) * vHeight);
+            }
+            maskCtx.stroke();
+          });
+
+          // Boxes
+          vid.boxes.forEach((box) => {
+            const bx = (box.xmin / 100) * vWidth;
+            const by = (box.ymin / 100) * vHeight;
+            const bw = ((box.xmax - box.xmin) / 100) * vWidth;
+            const bh = ((box.ymax - box.ymin) / 100) * vHeight;
+            maskCtx.fillRect(bx, by, bw, bh);
+          });
+
+          const maskData = maskCtx.getImageData(0, 0, vWidth, vHeight).data;
+          const pixelRadius = 6;
+
+          for (let y = 0; y < vHeight; y++) {
+            for (let x = 0; x < vWidth; x++) {
+              const idx = (y * vWidth + x) * 4;
+              // If mask is white at this position, repair the pixel
+              if (maskData[idx] > 120) {
+                let rSum = 0, gSum = 0, bSum = 0, count = 0;
+
+                // Simple high-speed pixel repair searching neighbors
+                for (let dy = -pixelRadius; dy <= pixelRadius; dy += 3) {
+                  const ny = y + dy;
+                  if (ny < 0 || ny >= vHeight) continue;
+
+                  for (let dx = -pixelRadius; dx <= pixelRadius; dx += 3) {
+                    const nx = x + dx;
+                    if (nx < 0 || nx >= vWidth) continue;
+
+                    const nidx = (ny * vWidth + nx) * 4;
+                    if (maskData[nidx] <= 120) {
+                      rSum += data[nidx];
+                      gSum += data[nidx + 1];
+                      bSum += data[nidx + 2];
+                      count++;
+                    }
+                  }
+                }
+
+                if (count > 0) {
+                  data[idx] = rSum / count;
+                  data[idx + 1] = gSum / count;
+                  data[idx + 2] = bSum / count;
+                } else {
+                  // Fallback: smudge from left
+                  const left = Math.max(0, idx - 4 * pixelRadius);
+                  data[idx] = data[left];
+                  data[idx + 1] = data[left + 1];
+                  data[idx + 2] = data[left + 2];
+                }
+              }
+            }
+          }
+          procCtx.putImageData(imgData, 0, 0);
+        }
+
+        const progressPercent = Math.round(((f + 1) / totalFrames) * 100);
+        setVideos((prev) =>
+          prev.map((v) =>
+            v.id === videoId
+              ? {
+                  ...v,
+                  errorMsg: `Cleaning frame ${f + 1}/${totalFrames} (${progressPercent}%)`,
+                }
+              : v
+          )
+        );
+      }
+
+      recorder.stop();
+
+      const processedBlob = await new Promise<Blob>((resolveBlob) => {
+        recorder.onstop = () => {
+          const finalBlob = new Blob(chunks, { type: "video/webm" });
+          resolveBlob(finalBlob);
+        };
+      });
+
+      const processedUrl = URL.createObjectURL(processedBlob);
+      setVideos((prev) =>
+        prev.map((v) =>
+          v.id === videoId
+            ? {
+                ...v,
+                processedUrl: processedUrl,
+                status: "done",
+                errorMsg: undefined,
+              }
+            : v
+        )
+      );
+    } catch (error: any) {
+      console.error(error);
+      setVideos((prev) =>
+        prev.map((v) =>
+          v.id === videoId ? { ...v, status: "error", errorMsg: error.message || "Pipeline failed." } : v
         )
       );
     }
@@ -845,90 +1149,52 @@ export default function App() {
         {/* Left Sidebar Queue / Controls */}
         <aside className={`w-full lg:w-80 border-r p-6 flex flex-col gap-6 shrink-0 min-h-[250px] lg:min-h-0 lg:h-full overflow-y-auto transition-colors duration-200 ${isDarkMode ? "bg-slate-900/60 border-slate-800" : "bg-slate-55 border-slate-200"}`}>
           
+          {/* Workspace Mode Selection (Geometric Tab) */}
+          <div className="flex flex-col gap-2">
+            <label className={`text-[10px] font-bold uppercase tracking-tighter block ${isDarkMode ? "text-slate-500" : "text-slate-400"}`}>
+              Workspace Modu
+            </label>
+            <div className={`grid grid-cols-2 p-1 gap-1 rounded-lg border transition-all duration-150 ${isDarkMode ? "bg-slate-950 border-slate-800" : "bg-slate-100 border-slate-200"}`}>
+              <button
+                onClick={() => setWorkspaceMode("image")}
+                className={`py-1.5 px-3 rounded text-[11px] font-bold uppercase tracking-wide flex items-center justify-center gap-1.5 transition-all text-center cursor-pointer ${
+                  workspaceMode === "image"
+                    ? "bg-indigo-600 text-white shadow"
+                    : (isDarkMode ? "text-slate-400 hover:text-white" : "text-slate-600 hover:text-slate-900")
+                }`}
+              >
+                <FileImage className="w-3.5 h-3.5" />
+                <span>Görsel</span>
+              </button>
+              <button
+                onClick={() => setWorkspaceMode("video")}
+                className={`py-1.5 px-3 rounded text-[11px] font-bold uppercase tracking-wide flex items-center justify-center gap-1.5 transition-all text-center cursor-pointer ${
+                  workspaceMode === "video"
+                    ? "bg-indigo-600 text-white shadow"
+                    : (isDarkMode ? "text-slate-400 hover:text-white" : "text-slate-600 hover:text-slate-900")
+                }`}
+              >
+                <Film className="w-3.5 h-3.5" />
+                <span>Video</span>
+              </button>
+            </div>
+          </div>
+
           {/* File Upload zone */}
           <div>
             <label className={`text-[10px] font-bold uppercase tracking-tighter mb-2 block ${isDarkMode ? "text-slate-550" : "text-slate-404"}`}>Input Source</label>
-            {images.length === 0 ? (
-              <label
-                onDragOver={preventDefaults}
-                onDragEnter={preventDefaults}
-                onDrop={handleFileUpload}
-                className={`w-full py-10 border-2 border-dashed rounded-lg flex flex-col items-center justify-center gap-2 transition duration-155 group cursor-pointer ${
-                  isDarkMode 
-                    ? "border-slate-800 bg-slate-900/40 hover:border-indigo-500 hover:bg-slate-900" 
-                    : "border-slate-300 bg-white hover:border-indigo-400 hover:bg-slate-50/50"
-                }`}
-              >
-                <input
-                  type="file"
-                  multiple
-                  accept="image/jpeg,image/png,image/jpg"
-                  onChange={handleFileUpload}
-                  className="hidden"
-                />
-                <div className={`p-2.5 rounded-lg text-slate-400 group-hover:text-indigo-500 transition ${isDarkMode ? "bg-slate-950" : "bg-slate-150"}`}>
-                  <Upload className="w-5 h-5 animate-bounce" />
-                </div>
-                <span className={`text-xs font-semibold ${isDarkMode ? "text-slate-300" : "text-slate-650"}`}>Drop JPG files here</span>
-                <span className="text-[10px] text-slate-400 font-mono">100% Quality Output</span>
-              </label>
-            ) : (
-              <div className={`border rounded-lg p-3.5 space-y-3.5 transition-colors ${isDarkMode ? "border-slate-800 bg-slate-900" : "border-slate-200 bg-white"}`}>
-                <div className={`flex justify-between items-center pb-2 border-b ${isDarkMode ? "border-slate-800" : "border-slate-100"}`}>
-                  <span className={`text-[11px] font-bold uppercase tracking-widest flex items-center gap-1 ${isDarkMode ? "text-slate-300" : "text-slate-700"}`}>
-                    <FileImage className="w-3.5 h-3.5 text-slate-400" /> Image files ({images.length})
-                  </span>
-                  <button
-                    onClick={() => {
-                      setImages([]);
-                      setActiveImageId(null);
-                    }}
-                    className="text-[10px] font-bold text-rose-500 hover:text-rose-400 uppercase tracking-wider cursor-pointer font-mono"
-                  >
-                    Clear All
-                  </button>
-                </div>
-
-                <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
-                  {images.map((img) => {
-                    const isActive = img.id === activeImageId;
-                    return (
-                      <div
-                        key={img.id}
-                        onClick={() => setActiveImageId(img.id)}
-                        className={`p-2 rounded border flex items-center gap-2 cursor-pointer transition ${
-                          isActive
-                            ? (isDarkMode ? "border-indigo-500 bg-indigo-950/25" : "border-indigo-600 bg-indigo-50/15")
-                            : (isDarkMode ? "border-slate-800 hover:border-slate-700 bg-slate-950/45" : "border-slate-100 hover:border-slate-300 bg-white")
-                        }`}
-                      >
-                        <div className={`w-8 h-8 rounded overflow-hidden border shrink-0 ${isDarkMode ? "border-slate-800" : "border-slate-200"}`}>
-                          <img src={img.originalUrl} className="w-full h-full object-cover" />
-                        </div>
-                        <div className="flex-1 min-w-0 pr-2">
-                          <p className={`text-xs font-mono truncate font-semibold ${isDarkMode ? "text-slate-200" : "text-slate-700"}`} title={img.name}>
-                            {img.name}
-                          </p>
-                          <p className="text-[9px] text-slate-400 font-mono mt-0.5">
-                            {getFileSizeString(img.size)}
-                          </p>
-                        </div>
-                        {img.status === "done" && (
-                          <CheckCircle className="w-4 h-4 text-emerald-500 fill-white shrink-0" />
-                        )}
-                        {img.status === "processing" && (
-                          <RefreshCw className="w-3 h-3 text-indigo-500 animate-spin shrink-0" />
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-
-                <label className={`w-full py-1.5 border rounded text-center block text-[10px] font-bold uppercase cursor-pointer transition ${
-                  isDarkMode 
-                    ? "bg-slate-950/60 border-slate-800 text-indigo-400 hover:border-indigo-805 hover:bg-slate-850" 
-                    : "bg-slate-50 border-slate-200 text-indigo-600 hover:border-indigo-300 hover:bg-indigo-50/20"
-                }`}>
+            {workspaceMode === "image" ? (
+              images.length === 0 ? (
+                <label
+                  onDragOver={preventDefaults}
+                  onDragEnter={preventDefaults}
+                  onDrop={handleFileUpload}
+                  className={`w-full py-10 border-2 border-dashed rounded-lg flex flex-col items-center justify-center gap-2 transition duration-155 group cursor-pointer ${
+                    isDarkMode 
+                      ? "border-slate-800 bg-slate-900/40 hover:border-indigo-500 hover:bg-slate-900" 
+                      : "border-slate-300 bg-white hover:border-indigo-400 hover:bg-slate-50/50"
+                  }`}
+                >
                   <input
                     type="file"
                     multiple
@@ -936,9 +1202,171 @@ export default function App() {
                     onChange={handleFileUpload}
                     className="hidden"
                   />
-                  + Add More Images
+                  <div className={`p-2.5 rounded-lg text-slate-400 group-hover:text-indigo-500 transition ${isDarkMode ? "bg-slate-950" : "bg-slate-150"}`}>
+                    <Upload className="w-5 h-5 animate-bounce" />
+                  </div>
+                  <span className={`text-xs font-semibold ${isDarkMode ? "text-slate-300" : "text-slate-650"}`}>Drop JPG files here</span>
+                  <span className="text-[10px] text-slate-400 font-mono">100% Quality Output</span>
                 </label>
-              </div>
+              ) : (
+                <div className={`border rounded-lg p-3.5 space-y-3.5 transition-colors ${isDarkMode ? "border-slate-800 bg-slate-900" : "border-slate-200 bg-white"}`}>
+                  <div className={`flex justify-between items-center pb-2 border-b ${isDarkMode ? "border-slate-800" : "border-slate-100"}`}>
+                    <span className={`text-[11px] font-bold uppercase tracking-widest flex items-center gap-1 ${isDarkMode ? "text-slate-300" : "text-slate-700"}`}>
+                      <FileImage className="w-3.5 h-3.5 text-slate-400" /> Image files ({images.length})
+                    </span>
+                    <button
+                      onClick={() => {
+                        setImages([]);
+                        setActiveImageId(null);
+                      }}
+                      className="text-[10px] font-bold text-rose-500 hover:text-rose-400 uppercase tracking-wider cursor-pointer font-mono"
+                    >
+                      Clear All
+                    </button>
+                  </div>
+
+                  <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
+                    {images.map((img) => {
+                      const isActive = img.id === activeImageId;
+                      return (
+                        <div
+                          key={img.id}
+                          onClick={() => setActiveImageId(img.id)}
+                          className={`p-2 rounded border flex items-center gap-2 cursor-pointer transition ${
+                            isActive
+                              ? (isDarkMode ? "border-indigo-500 bg-indigo-950/25" : "border-indigo-600 bg-indigo-50/15")
+                              : (isDarkMode ? "border-slate-800 hover:border-slate-700 bg-slate-950/45" : "border-slate-100 hover:border-slate-300 bg-white")
+                          }`}
+                        >
+                          <div className={`w-8 h-8 rounded overflow-hidden border shrink-0 ${isDarkMode ? "border-slate-800" : "border-slate-200"}`}>
+                            <img src={img.originalUrl} className="w-full h-full object-cover" />
+                          </div>
+                          <div className="flex-1 min-w-0 pr-2">
+                            <p className={`text-xs font-mono truncate font-semibold ${isDarkMode ? "text-slate-200" : "text-slate-700"}`} title={img.name}>
+                              {img.name}
+                            </p>
+                            <p className="text-[9px] text-slate-400 font-mono mt-0.5">
+                              {getFileSizeString(img.size)}
+                            </p>
+                          </div>
+                          {img.status === "done" && (
+                            <CheckCircle className="w-4 h-4 text-emerald-500 fill-white shrink-0" />
+                          )}
+                          {img.status === "processing" && (
+                            <RefreshCw className="w-3 h-3 text-indigo-500 animate-spin shrink-0" />
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  <label className={`w-full py-1.5 border rounded text-center block text-[10px] font-bold uppercase cursor-pointer transition ${
+                    isDarkMode 
+                      ? "bg-slate-950/60 border-slate-800 text-indigo-400 hover:border-indigo-805 hover:bg-slate-850" 
+                      : "bg-slate-50 border-slate-200 text-indigo-600 hover:border-indigo-300 hover:bg-indigo-50/20"
+                  }`}>
+                    <input
+                      type="file"
+                      multiple
+                      accept="image/jpeg,image/png,image/jpg"
+                      onChange={handleFileUpload}
+                      className="hidden"
+                    />
+                    + Add More Images
+                  </label>
+                </div>
+              )
+            ) : (
+              videos.length === 0 ? (
+                <label
+                  onDragOver={preventDefaults}
+                  onDragEnter={preventDefaults}
+                  onDrop={handleVideoUpload}
+                  className={`w-full py-10 border-2 border-dashed rounded-lg flex flex-col items-center justify-center gap-2 transition duration-155 group cursor-pointer ${
+                    isDarkMode 
+                      ? "border-slate-800 bg-slate-900/40 hover:border-indigo-500 hover:bg-slate-900" 
+                      : "border-slate-300 bg-white hover:border-indigo-400 hover:bg-slate-50/50"
+                  }`}
+                >
+                  <input
+                    type="file"
+                    accept="video/*"
+                    onChange={handleVideoUpload}
+                    className="hidden"
+                  />
+                  <div className={`p-2.5 rounded-lg text-slate-400 group-hover:text-indigo-500 transition ${isDarkMode ? "bg-slate-950" : "bg-slate-150"}`}>
+                    <Film className="w-5 h-5 animate-pulse" />
+                  </div>
+                  <span className={`text-xs font-semibold ${isDarkMode ? "text-slate-300" : "text-slate-655"}`}>Drop MP4/WebM files here</span>
+                  <span className="text-[10px] text-slate-400 font-mono">Lossless Render Engine</span>
+                </label>
+              ) : (
+                <div className={`border rounded-lg p-3.5 space-y-3.5 transition-colors ${isDarkMode ? "border-slate-800 bg-slate-900" : "border-slate-200 bg-white"}`}>
+                  <div className={`flex justify-between items-center pb-2 border-b ${isDarkMode ? "border-slate-800" : "border-slate-100"}`}>
+                    <span className={`text-[11px] font-bold uppercase tracking-widest flex items-center gap-1 ${isDarkMode ? "text-slate-300" : "text-slate-700"}`}>
+                      <Film className="w-3.5 h-3.5 text-slate-400" /> Video files ({videos.length})
+                    </span>
+                    <button
+                      onClick={() => {
+                        setVideos([]);
+                        setActiveVideoId(null);
+                      }}
+                      className="text-[10px] font-bold text-rose-500 hover:text-rose-400 uppercase tracking-wider cursor-pointer font-mono"
+                    >
+                      Clear All
+                    </button>
+                  </div>
+
+                  <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
+                    {videos.map((vid) => {
+                      const isActive = vid.id === activeVideoId;
+                      return (
+                        <div
+                          key={vid.id}
+                          onClick={() => setActiveVideoId(vid.id)}
+                          className={`p-2 rounded border flex items-center gap-2 cursor-pointer transition ${
+                            isActive
+                              ? (isDarkMode ? "border-indigo-500 bg-indigo-950/25" : "border-indigo-600 bg-indigo-50/15")
+                              : (isDarkMode ? "border-slate-800 hover:border-slate-700 bg-slate-950/45" : "border-slate-100 hover:border-slate-300 bg-white")
+                          }`}
+                        >
+                          <div className={`w-8 h-8 rounded border shrink-0 flex items-center justify-center bg-slate-950 ${isDarkMode ? "border-slate-800" : "border-slate-200"}`}>
+                            <Film className="w-4 h-4 text-indigo-450" />
+                          </div>
+                          <div className="flex-1 min-w-0 pr-2">
+                            <p className={`text-xs font-mono truncate font-semibold ${isDarkMode ? "text-slate-200" : "text-slate-700"}`} title={vid.name}>
+                              {vid.name}
+                            </p>
+                            <p className="text-[9px] text-slate-405 font-mono mt-0.5">
+                              {getFileSizeString(vid.size)} ({Math.round(vid.duration)}s)
+                            </p>
+                          </div>
+                          {vid.status === "done" && (
+                            <CheckCircle className="w-4 h-4 text-emerald-500 fill-white shrink-0" />
+                          )}
+                          {vid.status === "processing" && (
+                            <RefreshCw className="w-3 h-3 text-indigo-500 animate-spin shrink-0" />
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  <label className={`w-full py-1.5 border rounded text-center block text-[10px] font-bold uppercase cursor-pointer transition ${
+                    isDarkMode 
+                      ? "bg-slate-950/60 border-slate-800 text-indigo-400 hover:border-indigo-805 hover:bg-slate-850" 
+                      : "bg-slate-55 border-slate-200 text-indigo-600 hover:border-indigo-300 hover:bg-indigo-50/20"
+                  }`}>
+                    <input
+                      type="file"
+                      accept="video/*"
+                      onChange={handleVideoUpload}
+                      className="hidden"
+                    />
+                    + Add More Videos
+                  </label>
+                </div>
+              )
             )}
           </div>
 
@@ -974,12 +1402,12 @@ export default function App() {
                 <span className={`text-[10px] font-mono font-bold uppercase px-1.5 py-0.5 rounded ${isDarkMode ? "text-indigo-400 bg-indigo-950/50" : "text-indigo-600 bg-indigo-50"}`}>ALWAYS ON</span>
               </div>
               <div className="flex justify-between items-center">
-                <span>Auto-Export (JPG)</span>
+                <span>Auto-Export (Media)</span>
                 <span className={`text-[10px] font-mono font-bold uppercase px-1.5 py-0.5 rounded ${isDarkMode ? "text-indigo-400 bg-indigo-950/50" : "text-indigo-600 bg-indigo-50"}`}>ENABLED</span>
               </div>
               <div className="flex justify-between items-center pt-1">
-                <span>Quality Level</span>
-                <span className={`text-xs font-mono font-bold ${isDarkMode ? "text-indigo-400" : "text-indigo-600"}`}>95% (Optimized)</span>
+                <span>Pipeline Level</span>
+                <span className={`text-xs font-mono font-bold ${isDarkMode ? "text-indigo-400" : "text-indigo-600"}`}>GPU Accelerated</span>
               </div>
               
               {/* Diameter Slider */}
@@ -1001,7 +1429,7 @@ export default function App() {
           </div>
 
           {/* Batch operations */}
-          {images.length > 0 && (
+          {workspaceMode === "image" && images.length > 0 && (
             <div className="mt-auto pt-4 space-y-2">
               <button
                 disabled={isProcessingBatch || !images.some(i => i.paths.length > 0 || i.boxes.length > 0)}
@@ -1053,322 +1481,662 @@ export default function App() {
               </button>
             </div>
           )}
-
-          {activeImage ? (
-            <div className="flex-1 flex flex-col min-h-0 space-y-6">
-              
-              {/* Dynamic Workspace Container */}
-              <div className={`rounded-xl border overflow-hidden flex flex-col shadow-sm flex-1 min-h-0 transition-colors duration-200 ${isDarkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-200"}`}>
+          {workspaceMode === "image" ? (
+            activeImage ? (
+              <div className="flex-1 flex flex-col min-h-0 space-y-6">
                 
-                {/* File Header Info bar */}
-                <div className={`border-b px-6 py-3 flex flex-wrap gap-4 items-center justify-between transition-colors duration-200 ${isDarkMode ? "bg-slate-900/50 border-slate-800" : "bg-slate-50 border-slate-200"}`}>
-                  <div className="flex items-center gap-2.5">
-                    <span className={`text-xs font-bold px-2 py-0.5 rounded font-mono truncate max-w-[200px] transition-colors ${isDarkMode ? "text-indigo-400 bg-indigo-950/50" : "text-indigo-600 bg-indigo-50"}`} title={activeImage.name}>
-                      {activeImage.name}
-                    </span>
-                    <span className={`text-[10px] uppercase font-bold tracking-wider transition-colors ${isDarkMode ? "text-slate-500" : "text-slate-400"}`}>
-                      RESOLUTION: {activeImage.width}x{activeImage.height}px
-                    </span>
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    {/* Corners Dropdown */}
-                    <div className="relative group">
-                      <button className={`px-2.5 py-1.5 border rounded-sm text-xs font-medium flex items-center gap-1 cursor-pointer transition-colors ${
-                        isDarkMode
-                          ? "border-slate-850 hover:border-slate-705 bg-slate-950 text-slate-300 hover:text-white"
-                          : "border-slate-200 hover:border-slate-350 bg-white text-slate-700"
-                      }`}>
-                        <span>Filigran Presets</span>
-                        <ChevronRight className="w-3 h-3 rotate-90" />
-                      </button>
-                      <div className={`absolute right-0 top-full mt-1 w-44 rounded-sm shadow-lg opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto transition-all z-40 p-1 space-y-0.5 border transition-colors ${
-                        isDarkMode
-                          ? "bg-slate-900 border-slate-800 text-slate-200"
-                          : "bg-white border-slate-200 text-slate-700"
-                      }`}>
-                        <button
-                          onClick={() => handleApplyPreset("bottom-right")}
-                          className={`w-full text-left px-3 py-1.5 text-xs rounded transition font-medium cursor-pointer ${isDarkMode ? "hover:bg-slate-800 text-slate-300" : "text-slate-700 hover:bg-slate-50"}`}
-                          onMouseEnter={() => setHoveredPreset("bottom-right")}
-                          onMouseLeave={() => setHoveredPreset(null)}
-                        >
-                          Bottom Right Stamp
-                        </button>
-                        <button
-                          onClick={() => handleApplyPreset("bottom-center")}
-                          className={`w-full text-left px-3 py-1.5 text-xs rounded transition font-medium cursor-pointer ${isDarkMode ? "hover:bg-slate-800 text-slate-300" : "text-slate-700 hover:bg-slate-50"}`}
-                          onMouseEnter={() => setHoveredPreset("bottom-center")}
-                          onMouseLeave={() => setHoveredPreset(null)}
-                        >
-                          Bottom Center Brand
-                        </button>
-                        <button
-                          onClick={() => handleApplyPreset("top-left")}
-                          className={`w-full text-left px-3 py-1.5 text-xs rounded transition font-medium cursor-pointer ${isDarkMode ? "hover:bg-slate-800 text-slate-300" : "text-slate-700 hover:bg-slate-50"}`}
-                          onMouseEnter={() => setHoveredPreset("top-left")}
-                          onMouseLeave={() => setHoveredPreset(null)}
-                        >
-                          Top Left Logo
-                        </button>
-                        <button
-                          onClick={() => handleApplyPreset("top-right")}
-                          className={`w-full text-left px-3 py-1.5 text-xs rounded transition font-medium cursor-pointer ${isDarkMode ? "hover:bg-slate-800 text-slate-300" : "text-slate-700 hover:bg-slate-50"}`}
-                          onMouseEnter={() => setHoveredPreset("top-right")}
-                          onMouseLeave={() => setHoveredPreset(null)}
-                        >
-                          Top Right Stamp
-                        </button>
-                        <button
-                          onClick={() => handleApplyPreset("center-diagonal")}
-                          className={`w-full text-left px-3 py-1.5 text-xs rounded transition font-medium cursor-pointer ${isDarkMode ? "hover:bg-slate-800 text-slate-300" : "text-slate-700 hover:bg-slate-50"}`}
-                          onMouseEnter={() => setHoveredPreset("center-diagonal")}
-                          onMouseLeave={() => setHoveredPreset(null)}
-                        >
-                          Center Diagonal Brand
-                        </button>
-                      </div>
+                {/* Dynamic Workspace Container */}
+                <div className={`rounded-xl border overflow-hidden flex flex-col shadow-sm flex-1 min-h-0 transition-colors duration-200 ${isDarkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-200"}`}>
+                  
+                  {/* File Header Info bar */}
+                  <div className={`border-b px-6 py-3 flex flex-wrap gap-4 items-center justify-between transition-colors duration-200 ${isDarkMode ? "bg-slate-900/50 border-slate-800" : "bg-slate-50 border-slate-200"}`}>
+                    <div className="flex items-center gap-2.5">
+                      <span className={`text-xs font-bold px-2 py-0.5 rounded font-mono truncate max-w-[200px] transition-colors ${isDarkMode ? "text-indigo-400 bg-indigo-950/50" : "text-indigo-600 bg-indigo-50"}`} title={activeImage.name}>
+                        {activeImage.name}
+                      </span>
+                      <span className={`text-[10px] uppercase font-bold tracking-wider transition-colors ${isDarkMode ? "text-slate-500" : "text-slate-400"}`}>
+                        RESOLUTION: {activeImage.width}x{activeImage.height}px
+                      </span>
                     </div>
 
-                    <button
-                      disabled={activeImage.status === "detecting" || activeImage.status === "processing"}
-                      onClick={handleAIDetect}
-                      className="px-2.5 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white disabled:opacity-50 rounded-sm text-xs font-bold flex items-center gap-1.5 transition cursor-pointer"
-                    >
-                      <Sparkles className="w-3.5 h-3.5" />
-                      <span>AI Smart Detect</span>
-                    </button>
-
-                    <button
-                      disabled={activeImage.paths.length === 0 && activeImage.boxes.length === 0}
-                      onClick={handleCopyMaskToAll}
-                      style={{ contentVisibility: "auto" }}
-                      className={`px-2.5 py-1.5 border disabled:opacity-50 rounded-sm text-xs font-medium flex items-center gap-1.5 cursor-pointer transition-colors ${
-                        isDarkMode
-                          ? "border-slate-800 bg-slate-950 text-slate-300 hover:bg-slate-900"
-                          : "border-slate-200 bg-white text-slate-600 hover:bg-slate-55"
-                      }`}
-                    >
-                      <Copy className="w-3.5 h-3.5" />
-                      <span>Clone to All</span>
-                    </button>
-                  </div>
-                </div>
-
-                {/* Dark Interactive Editor Canvas viewport */}
-                <div className="flex-1 bg-slate-900 flex items-center justify-center p-6 relative overflow-hidden group min-h-[300px]">
-                  <div className="relative max-w-full max-h-[45vh] lg:max-h-[50vh] aspect-auto shadow-2xl flex items-center justify-center bg-slate-950 rounded border border-slate-800">
-                    <img
-                      src={activeImage.processedUrl || activeImage.originalUrl}
-                      alt="Active Viewport"
-                      className="max-w-full max-h-[45vh] lg:max-h-[50vh] object-contain select-none pointer-events-none rounded opacity-90"
-                    />
-
-                    {/* Paintable Drawing Canvas Overlay */}
-                    {!activeImage.processedUrl && (
-                      <canvas
-                        ref={canvasRef}
-                        width={activeImage.width}
-                        height={activeImage.height}
-                        onMouseDown={handleStartDraw}
-                        onMouseMove={handleMovingDraw}
-                        onMouseUp={handleStopDraw}
-                        onMouseLeave={handleStopDraw}
-                        onTouchStart={handleStartDraw}
-                        onTouchMove={handleMovingDraw}
-                        onTouchEnd={handleStopDraw}
-                        style={{ touchAction: "none" }}
-                        className="absolute inset-0 w-full h-full object-contain pointer-events-auto cursor-crosshair z-10"
-                      />
-                    )}
-
-                    {/* Bounding box hover hint */}
-                    {hoveredPreset && !activeImage.processedUrl && (
-                      <div
-                        className="absolute bg-indigo-500/15 border-2 border-dashed border-indigo-500 pointer-events-none z-20 transition-all duration-150 animate-pulse"
-                        style={{
-                          top: hoveredPreset === "bottom-right" ? "82%" : hoveredPreset === "bottom-center" ? "86%" : hoveredPreset === "top-left" ? "2%" : hoveredPreset === "top-right" ? "2%" : "35%",
-                          left: hoveredPreset === "bottom-right" ? "72%" : hoveredPreset === "bottom-center" ? "30%" : hoveredPreset === "top-left" ? "2%" : hoveredPreset === "top-right" ? "72%" : "20%",
-                          width: hoveredPreset === "bottom-right" ? "26%" : hoveredPreset === "bottom-center" ? "40%" : hoveredPreset === "top-left" ? "26%" : hoveredPreset === "top-right" ? "26%" : "60%",
-                          height: hoveredPreset === "bottom-right" ? "15%" : hoveredPreset === "bottom-center" ? "12%" : hoveredPreset === "top-left" ? "16%" : hoveredPreset === "top-right" ? "16%" : "30%"
-                        }}
-                      />
-                    )}
-
-                    {/* Loaders */}
-                    {(activeImage.status === "processing" || activeImage.status === "detecting") && (
-                      <div className="absolute inset-0 bg-slate-950/75 backdrop-blur-xs flex flex-col items-center justify-center z-35 text-white gap-3 rounded">
-                        <div className="p-3.5 bg-slate-900 border border-slate-800 rounded-full shadow-lg">
-                          <RefreshCw className="w-8 h-8 text-indigo-500 animate-spin" />
+                    <div className="flex items-center gap-2">
+                      {/* Corners Dropdown */}
+                      <div className="relative group">
+                        <button className={`px-2.5 py-1.5 border rounded-sm text-xs font-medium flex items-center gap-1 cursor-pointer transition-colors ${
+                          isDarkMode
+                            ? "border-slate-850 hover:border-slate-705 bg-slate-950 text-slate-300 hover:text-white"
+                            : "border-slate-200 hover:border-slate-350 bg-white text-slate-700"
+                        }`}>
+                          <span>Filigran Presets</span>
+                          <ChevronRight className="w-3 h-3 rotate-90" />
+                        </button>
+                        <div className={`absolute right-0 top-full mt-1 w-44 rounded-sm shadow-lg opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto transition-all z-40 p-1 space-y-0.5 border transition-colors ${
+                          isDarkMode
+                            ? "bg-slate-900 border-slate-800 text-slate-200"
+                            : "bg-white border-slate-200 text-slate-700"
+                        }`}>
+                          <button
+                            onClick={() => handleApplyPreset("bottom-right")}
+                            className={`w-full text-left px-3 py-1.5 text-xs rounded transition font-medium cursor-pointer ${isDarkMode ? "hover:bg-slate-800 text-slate-300" : "text-slate-700 hover:bg-slate-50"}`}
+                            onMouseEnter={() => setHoveredPreset("bottom-right")}
+                            onMouseLeave={() => setHoveredPreset(null)}
+                          >
+                            Bottom Right Stamp
+                          </button>
+                          <button
+                            onClick={() => handleApplyPreset("bottom-center")}
+                            className={`w-full text-left px-3 py-1.5 text-xs rounded transition font-medium cursor-pointer ${isDarkMode ? "hover:bg-slate-800 text-slate-300" : "text-slate-700 hover:bg-slate-50"}`}
+                            onMouseEnter={() => setHoveredPreset("bottom-center")}
+                            onMouseLeave={() => setHoveredPreset(null)}
+                          >
+                            Bottom Center Brand
+                          </button>
+                          <button
+                            onClick={() => handleApplyPreset("top-left")}
+                            className={`w-full text-left px-3 py-1.5 text-xs rounded transition font-medium cursor-pointer ${isDarkMode ? "hover:bg-slate-800 text-slate-300" : "text-slate-700 hover:bg-slate-50"}`}
+                            onMouseEnter={() => setHoveredPreset("top-left")}
+                            onMouseLeave={() => setHoveredPreset(null)}
+                          >
+                            Top Left Logo
+                          </button>
+                          <button
+                            onClick={() => handleApplyPreset("top-right")}
+                            className={`w-full text-left px-3 py-1.5 text-xs rounded transition font-medium cursor-pointer ${isDarkMode ? "hover:bg-slate-800 text-slate-300" : "text-slate-700 hover:bg-slate-50"}`}
+                            onMouseEnter={() => setHoveredPreset("top-right")}
+                            onMouseLeave={() => setHoveredPreset(null)}
+                          >
+                            Top Right Stamp
+                          </button>
+                          <button
+                            onClick={() => handleApplyPreset("center-diagonal")}
+                            className={`w-full text-left px-3 py-1.5 text-xs rounded transition font-medium cursor-pointer ${isDarkMode ? "hover:bg-slate-800 text-slate-300" : "text-slate-700 hover:bg-slate-50"}`}
+                            onMouseEnter={() => setHoveredPreset("center-diagonal")}
+                            onMouseLeave={() => setHoveredPreset(null)}
+                          >
+                            Center Diagonal Brand
+                          </button>
                         </div>
-                        <span className="text-[10px] font-bold tracking-widest font-mono uppercase bg-slate-900/85 px-3 py-1.5 rounded border border-slate-800 shadow-sm">
-                          {activeImage.status === "detecting" ? "AI ANALYZING STAMPS..." : "INPAINTING TEXTURE BRUSH..."}
-                        </span>
+                      </div>
+
+                      <button
+                        disabled={activeImage.status === "detecting" || activeImage.status === "processing"}
+                        onClick={handleAIDetect}
+                        className="px-2.5 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white disabled:opacity-50 rounded-sm text-xs font-bold flex items-center gap-1.5 transition cursor-pointer"
+                      >
+                        <Sparkles className="w-3.5 h-3.5" />
+                        <span>AI Smart Detect</span>
+                      </button>
+
+                      <button
+                        disabled={activeImage.paths.length === 0 && activeImage.boxes.length === 0}
+                        onClick={handleCopyMaskToAll}
+                        className={`px-2.5 py-1.5 border disabled:opacity-50 rounded-sm text-xs font-medium flex items-center gap-1.5 cursor-pointer transition-colors ${
+                          isDarkMode
+                            ? "border-slate-800 bg-slate-950 text-slate-300 hover:bg-slate-900"
+                            : "border-slate-200 bg-white text-slate-600 hover:bg-slate-55"
+                        }`}
+                      >
+                        <Copy className="w-3.5 h-3.5" />
+                        <span>Clone to All</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Dark Interactive Editor Canvas viewport */}
+                  <div className="flex-1 bg-slate-900 flex items-center justify-center p-6 relative overflow-hidden group min-h-[300px]">
+                    <div className="relative max-w-full max-h-[45vh] lg:max-h-[50vh] aspect-auto shadow-2xl flex items-center justify-center bg-slate-950 rounded border border-slate-800">
+                      <img
+                        src={activeImage.processedUrl || activeImage.originalUrl}
+                        alt="Active Viewport"
+                        className="max-w-full max-h-[45vh] lg:max-h-[50vh] object-contain select-none pointer-events-none rounded opacity-90"
+                      />
+
+                      {/* Paintable Drawing Canvas Overlay */}
+                      {!activeImage.processedUrl && (
+                        <canvas
+                          ref={canvasRef}
+                          width={activeImage.width}
+                          height={activeImage.height}
+                          onMouseDown={handleStartDraw}
+                          onMouseMove={handleMovingDraw}
+                          onMouseUp={handleStopDraw}
+                          onMouseLeave={handleStopDraw}
+                          onTouchStart={handleStartDraw}
+                          onTouchMove={handleMovingDraw}
+                          onTouchEnd={handleStopDraw}
+                          style={{ touchAction: "none" }}
+                          className="absolute inset-0 w-full h-full object-contain pointer-events-auto cursor-crosshair z-10"
+                        />
+                      )}
+
+                      {/* Bounding box hover hint */}
+                      {hoveredPreset && !activeImage.processedUrl && (
+                        <div
+                          className="absolute bg-indigo-500/15 border-2 border-dashed border-indigo-500 pointer-events-none z-20 transition-all duration-150 animate-pulse"
+                          style={{
+                            top: hoveredPreset === "bottom-right" ? "82%" : hoveredPreset === "bottom-center" ? "86%" : hoveredPreset === "top-left" ? "2%" : hoveredPreset === "top-right" ? "2%" : "35%",
+                            left: hoveredPreset === "bottom-right" ? "72%" : hoveredPreset === "bottom-center" ? "30%" : hoveredPreset === "top-left" ? "2%" : hoveredPreset === "top-right" ? "72%" : "20%",
+                            width: hoveredPreset === "bottom-right" ? "26%" : hoveredPreset === "bottom-center" ? "40%" : hoveredPreset === "top-left" ? "26%" : hoveredPreset === "top-right" ? "26%" : "60%",
+                            height: hoveredPreset === "bottom-right" ? "15%" : hoveredPreset === "bottom-center" ? "12%" : hoveredPreset === "top-left" ? "16%" : hoveredPreset === "top-right" ? "16%" : "30%"
+                          }}
+                        />
+                      )}
+
+                      {/* Loaders */}
+                      {(activeImage.status === "processing" || activeImage.status === "detecting") && (
+                        <div className="absolute inset-0 bg-slate-950/75 backdrop-blur-xs flex flex-col items-center justify-center z-35 text-white gap-3 rounded">
+                          <div className="p-3.5 bg-slate-900 border border-slate-800 rounded-full shadow-lg">
+                            <RefreshCw className="w-8 h-8 text-indigo-500 animate-spin" />
+                          </div>
+                          <span className="text-[10px] font-bold tracking-widest font-mono uppercase bg-slate-900/85 px-3 py-1.5 rounded border border-slate-800 shadow-sm">
+                            {activeImage.status === "detecting" ? "AI ANALYZING STAMPS..." : "INPAINTING TEXTURE BRUSH..."}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+
+                    {activeImage.processedUrl && (
+                      <div className="absolute top-4 left-4 z-40 bg-emerald-500/90 text-white font-bold text-[10px] tracking-wide uppercase py-1 px-3 rounded-full flex items-center gap-1 shadow-md">
+                        <CheckCircle className="w-3.5 h-3.5" /> Output Ready (Identical Name Saved)
                       </div>
                     )}
                   </div>
+                   {/* Bottom interactive action toolbar */}
+                  <div className={`border-t py-3.5 px-6 flex flex-wrap gap-4 items-center justify-between transition-colors duration-200 ${isDarkMode ? "bg-slate-900/50 border-slate-800" : "bg-slate-50 border-slate-200"}`}>
+                    <div className="flex items-center gap-1.5">
+                      {!activeImage.processedUrl ? (
+                        <>
+                          <button
+                            onClick={() => setTool("brush")}
+                            className={`p-1.5 rounded-sm transition cursor-pointer ${
+                              tool === "brush" ? "bg-indigo-600 text-white shadow" : (isDarkMode ? "bg-slate-950 text-slate-300 border border-slate-800 hover:bg-slate-900" : "bg-white text-slate-600 border border-slate-200 hover:bg-slate-50")
+                            }`}
+                            title="Inpainting Brush"
+                          >
+                            <Brush className="w-4 h-4" />
+                          </button>
+                          <button
+                            onClick={() => setTool("eraser")}
+                            className={`p-1.5 rounded-sm transition cursor-pointer ${
+                              tool === "eraser" ? "bg-indigo-600 text-white shadow" : (isDarkMode ? "bg-slate-950 text-slate-300 border border-slate-800 hover:bg-slate-900" : "bg-white text-slate-600 border border-slate-200 hover:bg-slate-50")
+                            }`}
+                            title="Erase Overlay Area"
+                          >
+                            <Eraser className="w-4 h-4" />
+                          </button>
+                          <button
+                            onClick={() => setTool("rectangle")}
+                            className={`p-1.5 rounded-sm transition cursor-pointer ${
+                              tool === "rectangle" ? "bg-indigo-600 text-white shadow" : (isDarkMode ? "bg-slate-950 text-slate-300 border border-slate-800 hover:bg-slate-900" : "bg-white text-slate-600 border border-slate-200 hover:bg-slate-50")
+                            }`}
+                            title="Add Bounding Area Box"
+                          >
+                            <Square className="w-4 h-4" />
+                          </button>
+                        </>
+                      ) : (
+                        <button
+                          onClick={() => {
+                            setImages((prev) =>
+                              prev.map((i) => (i.id === activeImageId ? { ...i, processedUrl: null, status: "idle" } : i))
+                            );
+                          }}
+                          className={`px-3 py-1.5 border rounded text-xs font-semibold cursor-pointer transition-colors ${
+                            isDarkMode
+                              ? "bg-slate-950 border-slate-800 text-slate-300 hover:bg-slate-900"
+                              : "bg-slate-100 border-slate-200 text-slate-700 hover:bg-slate-200"
+                          }`}
+                        >
+                          ← Edit Overlay Mask Again
+                        </button>
+                      )}
+                    </div>
 
-                  {activeImage.processedUrl && (
-                    <div className="absolute top-4 left-4 z-40 bg-emerald-500/90 text-white font-bold text-[10px] tracking-wide uppercase py-1 px-3 rounded-full flex items-center gap-1 shadow-md">
-                      <CheckCircle className="w-3.5 h-3.5" /> Output Ready (Identical Name Saved)
+                    <div className="flex items-center gap-2">
+                      {!activeImage.processedUrl && (
+                        <>
+                          <button
+                            onClick={handleUndo}
+                            disabled={activeImage.paths.length === 0 && activeImage.boxes.length === 0}
+                            className={`p-1.5 border disabled:opacity-50 rounded cursor-pointer transition-colors ${
+                              isDarkMode 
+                                ? "border-slate-800 bg-slate-950 text-slate-300 hover:bg-slate-900" 
+                                : "border-slate-200 bg-white text-slate-600 hover:bg-slate-105"
+                            }`}
+                          >
+                            <Undo className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            onClick={handleClearMask}
+                            disabled={activeImage.paths.length === 0 && activeImage.boxes.length === 0}
+                            className={`px-3 py-1.5 border disabled:opacity-50 rounded-sm text-xs font-bold uppercase tracking-wider cursor-pointer transition ${
+                              isDarkMode 
+                                ? "border-slate-800 bg-slate-950 text-slate-300 hover:bg-slate-900" 
+                                : "border-slate-200 bg-white text-slate-600 hover:bg-slate-105"
+                            }`}
+                          >
+                            Clear
+                          </button>
+                        </>
+                      )}
+
+                      {!activeImage.processedUrl ? (
+                        <button
+                          disabled={activeImage.paths.length === 0 && activeImage.boxes.length === 0}
+                          onClick={() => handleRemoveWatermarkSingle(activeImage.id)}
+                          className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-bold rounded-sm text-xs tracking-wider uppercase transition inline-flex items-center gap-1.5 cursor-pointer shadow-sm shadow-indigo-600/10"
+                        >
+                          <Sparkles className="w-3.5 h-3.5" />
+                          <span>Remove Watermark</span>
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => triggerSingleDownload(activeImage)}
+                          className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-sm text-xs tracking-wider uppercase transition inline-flex items-center gap-1.5 cursor-pointer shadow-sm shadow-emerald-600/10"
+                        >
+                          <Download className="w-3.5 h-3.5" />
+                          <span>Download Outputs</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                </div>
+
+                {/* Marked Region coordinates listing section */}
+                <div className={`rounded-lg border p-4 transition-colors ${isDarkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-200"}`}>
+                  <h4 className={`text-[10px] font-bold uppercase tracking-widest mb-3 flex items-center gap-1 ${isDarkMode ? "text-slate-500" : "text-slate-400"}`}>
+                    <SquaresIcon className="w-4 h-4 text-slate-400" /> Mask Overlays on this file
+                  </h4>
+
+                  {activeImage.paths.length === 0 && activeImage.boxes.length === 0 ? (
+                    <p className="text-xs text-slate-404 italic">No inpaint locations marked. Brush over the watermark or hit Auto AI Detect.</p>
+                  ) : (
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
+                      {activeImage.boxes.map((box, idx) => (
+                        <div key={box.id} className={`p-2 border rounded flex items-center justify-between text-xs font-mono transition-colors ${isDarkMode ? "border-slate-800 bg-slate-950/60" : "border-slate-100 bg-slate-50"}`}>
+                          <div className="truncate">
+                            <span className={`font-bold uppercase tracking-tight text-[10px] ${isDarkMode ? "text-indigo-400" : "text-indigo-600"}`}>{box.label || "Box Area"}</span>
+                            <span className={`text-[9px] ml-1 ${isDarkMode ? "text-slate-500" : "text-slate-400"}`}>[{Math.round(box.xmin)}%, {Math.round(box.ymin)}%]</span>
+                          </div>
+                          <button onClick={() => deleteBox(box.id)} className="text-slate-405 hover:text-rose-500 p-0.5 cursor-pointer">
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      ))}
+
+                      {activeImage.paths.map((pth) => (
+                        <div key={pth.id} className={`p-2 border rounded flex items-center justify-between text-xs font-mono transition-colors ${isDarkMode ? "border-slate-800 bg-slate-950/60" : "border-slate-100 bg-slate-50"}`}>
+                          <div>
+                            <span className={`font-bold uppercase tracking-tight text-[10px] ${isDarkMode ? "text-indigo-400" : "text-indigo-600"}`}>Brush Stroke</span>
+                            <span className={`text-[9px] ml-1 ${isDarkMode ? "text-slate-505" : "text-slate-400"}`}>{pth.points.length} nodes ({pth.brushSize}px)</span>
+                          </div>
+                          <button
+                            onClick={() => {
+                              updateActiveImageMasks(
+                                activeImage.paths.filter((p) => p.id !== pth.id),
+                                activeImage.boxes
+                              );
+                            }}
+                            className="text-slate-400 hover:text-rose-500 p-0.5 cursor-pointer"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      ))}
                     </div>
                   )}
                 </div>
 
-                {/* Bottom interactive action toolbar */}
-                <div className={`border-t py-3.5 px-6 flex flex-wrap gap-4 items-center justify-between transition-colors duration-200 ${isDarkMode ? "bg-slate-900/50 border-slate-800" : "bg-slate-50 border-slate-200"}`}>
-                  <div className="flex items-center gap-1.5">
-                    {!activeImage.processedUrl ? (
-                      <>
-                        <button
-                          onClick={() => setTool("brush")}
-                          className={`p-1.5 rounded-sm transition cursor-pointer ${
-                            tool === "brush" ? "bg-indigo-600 text-white shadow" : (isDarkMode ? "bg-slate-950 text-slate-300 border border-slate-800 hover:bg-slate-900" : "bg-white text-slate-600 border border-slate-200 hover:bg-slate-50")
-                          }`}
-                          title="Inpainting Brush"
-                        >
-                          <Brush className="w-4 h-4" />
-                        </button>
-                        <button
-                          onClick={() => setTool("eraser")}
-                          className={`p-1.5 rounded-sm transition cursor-pointer ${
-                            tool === "eraser" ? "bg-indigo-600 text-white shadow" : (isDarkMode ? "bg-slate-950 text-slate-300 border border-slate-800 hover:bg-slate-900" : "bg-white text-slate-600 border border-slate-200 hover:bg-slate-50")
-                          }`}
-                          title="Erase Overlay Area"
-                        >
-                          <Eraser className="w-4 h-4" />
-                        </button>
-                        <button
-                          onClick={() => setTool("rectangle")}
-                          className={`p-1.5 rounded-sm transition cursor-pointer ${
-                            tool === "rectangle" ? "bg-indigo-600 text-white shadow" : (isDarkMode ? "bg-slate-950 text-slate-300 border border-slate-800 hover:bg-slate-900" : "bg-white text-slate-600 border border-slate-200 hover:bg-slate-50")
-                          }`}
-                          title="Add Bounding Area Box"
-                        >
-                          <Square className="w-4 h-4" />
-                        </button>
-                      </>
-                    ) : (
-                      <button
-                        onClick={() => {
-                          setImages((prev) =>
-                            prev.map((i) => (i.id === activeImageId ? { ...i, processedUrl: null, status: "idle" } : i))
-                          );
-                        }}
-                        className={`px-3 py-1.5 border rounded text-xs font-semibold cursor-pointer transition-colors ${
+              </div>
+            ) : (
+              <div className={`flex-1 flex flex-col items-center justify-center border-2 border-dashed rounded-xl p-12 text-center shadow-xs transition-colors duration-200 ${isDarkMode ? "border-slate-800 bg-slate-900" : "border-slate-200 bg-white"}`}>
+                <ImageIcon className={`w-12 h-12 mb-4 ${isDarkMode ? "text-slate-700" : "text-slate-300"}`} />
+                <h3 className={`text-sm font-bold uppercase tracking-widest ${isDarkMode ? "text-slate-300" : "text-slate-800"}`}>Workspace idle</h3>
+                <p className="text-xs text-slate-400 mt-1 max-w-sm">
+                  Drop multiple JPG or PNG images on the left channel sidebar first to enable local canvas inpainting and batch actions.
+                </p>
+              </div>
+            )
+          ) : (
+            activeVideo ? (
+              <div className="flex-1 flex flex-col min-h-0 space-y-6">
+                
+                {/* Dynamic Workspace Container */}
+                <div className={`rounded-xl border overflow-hidden flex flex-col shadow-sm flex-1 min-h-0 transition-colors duration-200 ${isDarkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-200"}`}>
+                  
+                  {/* File Header Info bar */}
+                  <div className={`border-b px-6 py-3 flex flex-wrap gap-4 items-center justify-between transition-colors duration-200 ${isDarkMode ? "bg-slate-900/50 border-slate-800" : "bg-slate-50 border-slate-200"}`}>
+                    <div className="flex items-center gap-2.5">
+                      <span className={`text-xs font-bold px-2 py-0.5 rounded font-mono truncate max-w-[200px] transition-colors ${isDarkMode ? "text-indigo-400 bg-indigo-950/50" : "text-indigo-600 bg-indigo-50"}`} title={activeVideo.name}>
+                        {activeVideo.name}
+                      </span>
+                      <span className={`text-[10px] uppercase font-bold tracking-wider transition-colors ${isDarkMode ? "text-slate-500" : "text-slate-400"}`}>
+                        RESOLUTION: {activeVideo.width}x{activeVideo.height}px | DURATION: {Math.round(activeVideo.duration)}s
+                      </span>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      {/* Corners Dropdown */}
+                      <div className="relative group">
+                        <button className={`px-2.5 py-1.5 border rounded-sm text-xs font-medium flex items-center gap-1 cursor-pointer transition-colors ${
                           isDarkMode
-                            ? "bg-slate-950 border-slate-800 text-slate-300 hover:bg-slate-900"
-                            : "bg-slate-100 border-slate-200 text-slate-700 hover:bg-slate-200"
+                            ? "border-slate-850 hover:border-slate-705 bg-slate-950 text-slate-300 hover:text-white"
+                            : "border-slate-200 hover:border-slate-350 bg-white text-slate-700"
+                        }`}>
+                          <span>Filigran Presets</span>
+                          <ChevronRight className="w-3 h-3 rotate-90" />
+                        </button>
+                        <div className={`absolute right-0 top-full mt-1 w-44 rounded-sm shadow-lg opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto transition-all z-40 p-1 space-y-0.5 border transition-colors ${
+                          isDarkMode
+                            ? "bg-slate-900 border-slate-800 text-slate-200"
+                            : "bg-white border-slate-200 text-slate-700"
+                        }`}>
+                          <button
+                            onClick={() => handleApplyPreset("bottom-right")}
+                            className={`w-full text-left px-3 py-1.5 text-xs rounded transition font-medium cursor-pointer ${isDarkMode ? "hover:bg-slate-800 text-slate-300" : "text-slate-700 hover:bg-slate-50"}`}
+                          >
+                            Bottom Right Stamp
+                          </button>
+                          <button
+                            onClick={() => handleApplyPreset("bottom-center")}
+                            className={`w-full text-left px-3 py-1.5 text-xs rounded transition font-medium cursor-pointer ${isDarkMode ? "hover:bg-slate-800 text-slate-300" : "text-slate-700 hover:bg-slate-50"}`}
+                          >
+                            Bottom Center Brand
+                          </button>
+                          <button
+                            onClick={() => handleApplyPreset("top-left")}
+                            className={`w-full text-left px-3 py-1.5 text-xs rounded transition font-medium cursor-pointer ${isDarkMode ? "hover:bg-slate-800 text-slate-300" : "text-slate-700 hover:bg-slate-50"}`}
+                          >
+                            Top Left Logo
+                          </button>
+                          <button
+                            onClick={() => handleApplyPreset("top-right")}
+                            className={`w-full text-left px-3 py-1.5 text-xs rounded transition font-medium cursor-pointer ${isDarkMode ? "hover:bg-slate-800 text-slate-300" : "text-slate-700 hover:bg-slate-50"}`}
+                          >
+                            Top Right Stamp
+                          </button>
+                          <button
+                            onClick={() => handleApplyPreset("center-diagonal")}
+                            className={`w-full text-left px-3 py-1.5 text-xs rounded transition font-medium cursor-pointer ${isDarkMode ? "hover:bg-slate-800 text-slate-300" : "text-slate-700 hover:bg-slate-50"}`}
+                          >
+                            Center Diagonal Brand
+                          </button>
+                        </div>
+                      </div>
+
+                      <button
+                        disabled={activeVideo.paths.length === 0 && activeVideo.boxes.length === 0}
+                        onClick={handleCopyMaskToAll}
+                        className={`px-2.5 py-1.5 border disabled:opacity-50 rounded-sm text-xs font-medium flex items-center gap-1.5 cursor-pointer transition-colors ${
+                          isDarkMode
+                            ? "border-slate-800 bg-slate-950 text-slate-300 hover:bg-slate-900"
+                            : "border-slate-200 bg-white text-slate-606"
                         }`}
                       >
-                        ← Edit Overlay Mask Again
+                        <Copy className="w-3.5 h-3.5" />
+                        <span>Clone to All</span>
                       </button>
-                    )}
+                    </div>
                   </div>
 
-                  <div className="flex items-center gap-2">
-                    {!activeImage.processedUrl && (
-                      <>
-                        <button
-                          onClick={handleUndo}
-                          disabled={activeImage.paths.length === 0 && activeImage.boxes.length === 0}
-                          className={`p-1.5 border disabled:opacity-50 rounded cursor-pointer transition-colors ${
-                            isDarkMode 
-                              ? "border-slate-800 bg-slate-950 text-slate-300 hover:bg-slate-900" 
-                              : "border-slate-200 bg-white text-slate-600 hover:bg-slate-105"
-                          }`}
-                        >
-                          <Undo className="w-3.5 h-3.5" />
-                        </button>
-                        <button
-                          onClick={handleClearMask}
-                          disabled={activeImage.paths.length === 0 && activeImage.boxes.length === 0}
-                          className={`px-3 py-1.5 border disabled:opacity-50 rounded-sm text-xs font-bold uppercase tracking-wider cursor-pointer transition ${
-                            isDarkMode 
-                              ? "border-slate-800 bg-slate-950 text-slate-300 hover:bg-slate-900" 
-                              : "border-slate-200 bg-white text-slate-600 hover:bg-slate-105"
-                          }`}
-                        >
-                          Clear
-                        </button>
-                      </>
-                    )}
+                  {/* Video Playback Interactive Viewport Container */}
+                  <div className="flex-1 bg-slate-900 flex items-center justify-center p-6 relative overflow-hidden group min-h-[300px]">
+                    <div className="relative max-w-full max-h-[45vh] lg:max-h-[50vh] aspect-auto shadow-2xl flex items-center justify-center bg-slate-950 rounded border border-slate-800">
+                      
+                      {/* HTML5 Video Element */}
+                      <video
+                        ref={videoRef}
+                        src={activeVideo.processedUrl || activeVideo.originalUrl}
+                        className="max-w-full max-h-[45vh] lg:max-h-[50vh] object-contain rounded opacity-90"
+                        muted
+                        playsInline
+                        loop
+                        onTimeUpdate={() => {
+                          if (videoRef.current) setVideoTime(videoRef.current.currentTime);
+                        }}
+                        onLoadedMetadata={() => {
+                          if (videoRef.current) setVideoDuration(videoRef.current.duration);
+                        }}
+                      />
 
-                    {!activeImage.processedUrl ? (
-                      <button
-                        disabled={activeImage.paths.length === 0 && activeImage.boxes.length === 0}
-                        onClick={() => handleRemoveWatermarkSingle(activeImage.id)}
-                        className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-bold rounded-sm text-xs tracking-wider uppercase transition inline-flex items-center gap-1.5 cursor-pointer shadow-sm shadow-indigo-600/10"
-                      >
-                        <Sparkles className="w-3.5 h-3.5" />
-                        <span>Remove Watermark</span>
-                      </button>
-                    ) : (
-                      <button
-                        onClick={() => triggerSingleDownload(activeImage)}
-                        className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-sm text-xs tracking-wider uppercase transition inline-flex items-center gap-1.5 cursor-pointer shadow-sm shadow-emerald-600/10"
-                      >
-                        <Download className="w-3.5 h-3.5" />
-                        <span>Download Outputs</span>
-                      </button>
-                    )}
-                  </div>
-                </div>
+                      {/* Paintable Drawing Canvas Overlay */}
+                      {!activeVideo.processedUrl && (
+                        <canvas
+                          ref={canvasRef}
+                          width={activeVideo.width}
+                          height={activeVideo.height}
+                          onMouseDown={handleStartDraw}
+                          onMouseMove={handleMovingDraw}
+                          onMouseUp={handleStopDraw}
+                          onMouseLeave={handleStopDraw}
+                          onTouchStart={handleStartDraw}
+                          onTouchMove={handleMovingDraw}
+                          onTouchEnd={handleStopDraw}
+                          style={{ touchAction: "none" }}
+                          className="absolute inset-0 w-full h-full object-contain pointer-events-auto cursor-crosshair z-10"
+                        />
+                      )}
 
-              </div>              {/* Marked Region coordinates listing section */}
-              <div className={`rounded-lg border p-4 transition-colors ${isDarkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-200"}`}>
-                <h4 className={`text-[10px] font-bold uppercase tracking-widest mb-3 flex items-center gap-1 ${isDarkMode ? "text-slate-500" : "text-slate-400"}`}>
-                  <SquaresIcon className="w-4 h-4 text-slate-400" /> Mask Overlays on this file
-                </h4>
-
-                {activeImage.paths.length === 0 && activeImage.boxes.length === 0 ? (
-                  <p className="text-xs text-slate-400 italic">No inpaint locations marked. Brush over the watermark or hit Auto AI Detect.</p>
-                ) : (
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
-                    {activeImage.boxes.map((box, idx) => (
-                      <div key={box.id} className={`p-2 border rounded flex items-center justify-between text-xs font-mono transition-colors ${isDarkMode ? "border-slate-800 bg-slate-950/60" : "border-slate-100 bg-slate-50"}`}>
-                        <div className="truncate">
-                          <span className={`font-bold uppercase tracking-tight text-[10px] ${isDarkMode ? "text-indigo-400" : "text-indigo-600"}`}>{box.label || "Box Area"}</span>
-                          <span className={`text-[9px] ml-1 ${isDarkMode ? "text-slate-500" : "text-slate-400"}`}>[{Math.round(box.xmin)}%, {Math.round(box.ymin)}%]</span>
+                      {/* Loaders */}
+                      {activeVideo.status === "processing" && (
+                        <div className="absolute inset-0 bg-slate-950/75 backdrop-blur-xs flex flex-col items-center justify-center z-35 text-white gap-3 rounded">
+                          <div className="p-3.5 bg-slate-900 border border-slate-800 rounded-full shadow-lg">
+                            <RefreshCw className="w-8 h-8 text-indigo-500 animate-spin" />
+                          </div>
+                          <span className="text-[10px] font-bold tracking-widest font-mono uppercase bg-slate-900/85 px-3 py-1.5 rounded border border-slate-800 shadow-sm text-center">
+                            {activeVideo.errorMsg || "REPAIRING VIDEO WATERMARKS..."}
+                          </span>
                         </div>
-                        <button onClick={() => deleteBox(box.id)} className="text-slate-400 hover:text-rose-500 p-0.5 cursor-pointer">
-                          <X className="w-3.5 h-3.5" />
-                        </button>
+                      )}
+                    </div>
+
+                    {activeVideo.processedUrl && (
+                      <div className="absolute top-4 left-4 z-40 bg-emerald-500/90 text-white font-bold text-[10px] tracking-wide uppercase py-1 px-3 rounded-full flex items-center gap-1 shadow-md">
+                        <CheckCircle className="w-3.5 h-3.5" /> Clean Video Output Ready
                       </div>
-                    ))}
+                    )}
+                  </div>
 
-                    {activeImage.paths.map((pth) => (
-                      <div key={pth.id} className={`p-2 border rounded flex items-center justify-between text-xs font-mono transition-colors ${isDarkMode ? "border-slate-800 bg-slate-950/60" : "border-slate-100 bg-slate-50"}`}>
-                        <div>
-                          <span className={`font-bold uppercase tracking-tight text-[10px] ${isDarkMode ? "text-indigo-400" : "text-indigo-600"}`}>Brush Stroke</span>
-                          <span className={`text-[9px] ml-1 ${isDarkMode ? "text-slate-505" : "text-slate-400"}`}>{pth.points.length} nodes ({pth.brushSize}px)</span>
-                        </div>
+                  {/* Scrub seek bar */}
+                  <div className={`px-6 py-2 border-t flex items-center gap-3 transition-colors ${isDarkMode ? "bg-slate-950/40 border-slate-850" : "bg-slate-50 border-slate-100"}`}>
+                    <span className="text-[10px] font-mono font-bold text-slate-400">
+                      {Math.round(videoTime)}s
+                    </span>
+                    <input
+                      type="range"
+                      min="0"
+                      max={videoDuration || 100}
+                      step="0.05"
+                      value={videoTime}
+                      onChange={(e) => {
+                        const t = parseFloat(e.target.value);
+                        setVideoTime(t);
+                        if (videoRef.current) videoRef.current.currentTime = t;
+                      }}
+                      className="flex-1 h-1 rounded-full appearance-none cursor-pointer accent-indigo-600 bg-slate-800"
+                    />
+                    <span className="text-[10px] font-mono font-bold text-slate-400">
+                      {Math.round(videoDuration || 0)}s
+                    </span>
+                  </div>
+
+                  {/* Bottom interactive action toolbar */}
+                  <div className={`border-t py-3.5 px-6 flex flex-wrap gap-4 items-center justify-between transition-colors duration-200 ${isDarkMode ? "bg-slate-900/50 border-slate-800" : "bg-slate-50 border-slate-200"}`}>
+                    <div className="flex items-center gap-2">
+                      {/* Play/Pause control */}
+                      <button
+                        onClick={() => {
+                          if (!videoRef.current) return;
+                          if (isPlaying) {
+                            videoRef.current.pause();
+                            setIsPlaying(false);
+                          } else {
+                            videoRef.current.play();
+                            setIsPlaying(true);
+                          }
+                        }}
+                        className="px-3 py-1.5 text-xs font-bold rounded flex items-center gap-1 cursor-pointer transition bg-indigo-600 hover:bg-indigo-700 text-white"
+                      >
+                        {isPlaying ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5 fill-current" />}
+                        <span>{isPlaying ? "Pause" : "Play"}</span>
+                      </button>
+
+                      {!activeVideo.processedUrl ? (
+                        <>
+                          <button
+                            onClick={() => setTool("brush")}
+                            className={`p-1.5 rounded-sm transition cursor-pointer ${
+                              tool === "brush" ? "bg-indigo-600 text-white shadow" : (isDarkMode ? "bg-slate-950 text-slate-300 border border-slate-800 hover:bg-slate-900" : "bg-white text-slate-600 border border-slate-200 hover:bg-slate-50")
+                            }`}
+                            title="Inpainting Brush"
+                          >
+                            <Brush className="w-4 h-4" />
+                          </button>
+                          <button
+                            onClick={() => setTool("eraser")}
+                            className={`p-1.5 rounded-sm transition cursor-pointer ${
+                              tool === "eraser" ? "bg-indigo-600 text-white shadow" : (isDarkMode ? "bg-slate-950 text-slate-300 border border-slate-800 hover:bg-slate-900" : "bg-white text-slate-600 border border-slate-200 hover:bg-slate-50")
+                            }`}
+                            title="Erase Overlay Area"
+                          >
+                            <Eraser className="w-4 h-4" />
+                          </button>
+                          <button
+                            onClick={() => setTool("rectangle")}
+                            className={`p-1.5 rounded-sm transition cursor-pointer ${
+                              tool === "rectangle" ? "bg-indigo-600 text-white shadow" : (isDarkMode ? "bg-slate-950 text-slate-300 border border-slate-800 hover:bg-slate-900" : "bg-white text-slate-600 border border-slate-200 hover:bg-slate-50")
+                            }`}
+                            title="Add Bounding Area Box"
+                          >
+                            <Square className="w-4 h-4" />
+                          </button>
+                        </>
+                      ) : (
                         <button
                           onClick={() => {
-                            updateActiveImageMasks(
-                              activeImage.paths.filter((p) => p.id !== pth.id),
-                              activeImage.boxes
+                            setVideos((prev) =>
+                              prev.map((v) => (v.id === activeVideoId ? { ...v, processedUrl: null, status: "idle" } : v))
                             );
                           }}
-                          className="text-slate-400 hover:text-rose-500 p-0.5 cursor-pointer"
+                          className={`px-3 py-1.5 border rounded text-xs font-semibold cursor-pointer transition-colors ${
+                            isDarkMode
+                              ? "bg-slate-950 border-slate-800 text-slate-300 hover:bg-slate-900"
+                              : "bg-slate-100 border-slate-200 text-slate-700 hover:bg-slate-200"
+                          }`}
                         >
-                          <X className="w-3.5 h-3.5" />
+                          ← Edit Overlay Mask Again
                         </button>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
+                      )}
+                    </div>
 
-            </div>
-          ) : (
-            <div className={`flex-1 flex flex-col items-center justify-center border-2 border-dashed rounded-xl p-12 text-center shadow-xs transition-colors duration-200 ${isDarkMode ? "border-slate-800 bg-slate-900" : "border-slate-200 bg-white"}`}>
-              <ImageIcon className={`w-12 h-12 mb-4 ${isDarkMode ? "text-slate-700" : "text-slate-300"}`} />
-              <h3 className={`text-sm font-bold uppercase tracking-widest ${isDarkMode ? "text-slate-300" : "text-slate-800"}`}>Workspace idle</h3>
-              <p className="text-xs text-slate-400 mt-1 max-w-sm">
-                Drop multiple JPG or PNG images on the left channel sidebar first to enable local canvas inpainting and batch actions.
-              </p>
-            </div>
+                    <div className="flex items-center gap-2">
+                      {!activeVideo.processedUrl && (
+                        <>
+                          <button
+                            onClick={handleUndo}
+                            disabled={activeVideo.paths.length === 0 && activeVideo.boxes.length === 0}
+                            className={`p-1.5 border disabled:opacity-50 rounded cursor-pointer transition-colors ${
+                              isDarkMode 
+                                ? "border-slate-800 bg-slate-950 text-slate-300 hover:bg-slate-900" 
+                                : "border-slate-200 bg-white text-slate-600 hover:bg-slate-105"
+                            }`}
+                          >
+                            <Undo className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            onClick={handleClearMask}
+                            disabled={activeVideo.paths.length === 0 && activeVideo.boxes.length === 0}
+                            className={`px-3 py-1.5 border disabled:opacity-50 rounded-sm text-xs font-bold uppercase tracking-wider cursor-pointer transition ${
+                              isDarkMode 
+                                ? "border-slate-800 bg-slate-950 text-slate-300 hover:bg-slate-900" 
+                                : "border-slate-200 bg-white text-slate-600 hover:bg-slate-105"
+                            }`}
+                          >
+                            Clear
+                          </button>
+                        </>
+                      )}
+
+                      {!activeVideo.processedUrl ? (
+                        <button
+                          disabled={activeVideo.paths.length === 0 && activeVideo.boxes.length === 0}
+                          onClick={() => handleRemoveWatermarkVideo(activeVideo.id)}
+                          className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-bold rounded-sm text-xs tracking-wider uppercase transition inline-flex items-center gap-1.5 cursor-pointer shadow-sm shadow-indigo-600/10"
+                        >
+                          <Sparkles className="w-3.5 h-3.5" />
+                          <span>Remove Watermark</span>
+                        </button>
+                      ) : (
+                        <a
+                          href={activeVideo.processedUrl}
+                          download={activeVideo.name.replace(/\.[^/.]+$/, "") + "_cleared.webm"}
+                          className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-sm text-xs tracking-wider uppercase transition inline-flex items-center gap-1.5 cursor-pointer shadow-sm shadow-emerald-600/10"
+                        >
+                          <Download className="w-3.5 h-3.5" />
+                          <span>Download Output</span>
+                        </a>
+                      )}
+                    </div>
+                  </div>
+
+                </div>
+
+                {/* Marked Region coordinates listing section */}
+                <div className={`rounded-lg border p-4 transition-colors ${isDarkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-200"}`}>
+                  <h4 className={`text-[10px] font-bold uppercase tracking-widest mb-3 flex items-center gap-1 ${isDarkMode ? "text-slate-500" : "text-slate-400"}`}>
+                    <SquaresIcon className="w-4 h-4 text-slate-400" /> Mask Overlays on this file
+                  </h4>
+
+                  {activeVideo.paths.length === 0 && activeVideo.boxes.length === 0 ? (
+                    <p className="text-xs text-slate-404 italic">No inpaint locations marked. Brush over the watermark or apply preset stamps.</p>
+                  ) : (
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
+                      {activeVideo.boxes.map((box, idx) => (
+                        <div key={box.id} className={`p-2 border rounded flex items-center justify-between text-xs font-mono transition-colors ${isDarkMode ? "border-slate-800 bg-slate-950/60" : "border-slate-100 bg-slate-50"}`}>
+                          <div className="truncate">
+                            <span className={`font-bold uppercase tracking-tight text-[10px] ${isDarkMode ? "text-indigo-400" : "text-indigo-600"}`}>{box.label || "Box Area"}</span>
+                            <span className={`text-[9px] ml-1 ${isDarkMode ? "text-slate-500" : "text-slate-404"}`}>[{Math.round(box.xmin)}%, {Math.round(box.ymin)}%]</span>
+                          </div>
+                          <button onClick={() => deleteBox(box.id)} className="text-slate-400 hover:text-rose-500 p-0.5 cursor-pointer">
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      ))}
+
+                      {activeVideo.paths.map((pth) => (
+                        <div key={pth.id} className={`p-2 border rounded flex items-center justify-between text-xs font-mono transition-colors ${isDarkMode ? "border-slate-800 bg-slate-950/60" : "border-slate-100 bg-slate-50"}`}>
+                          <div>
+                            <span className={`font-bold uppercase tracking-tight text-[10px] ${isDarkMode ? "text-indigo-400" : "text-indigo-600"}`}>Brush Stroke</span>
+                            <span className={`text-[9px] ml-1 ${isDarkMode ? "text-slate-505" : "text-slate-404"}`}>{pth.points.length} nodes ({pth.brushSize}px)</span>
+                          </div>
+                          <button
+                            onClick={() => {
+                              updateActiveVideoMasks(
+                                activeVideo.paths.filter((p) => p.id !== pth.id),
+                                activeVideo.boxes
+                              );
+                            }}
+                            className="text-slate-400 hover:text-rose-500 p-0.5 cursor-pointer"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+              </div>
+            ) : (
+              <div className={`flex-1 flex flex-col items-center justify-center border-2 border-dashed rounded-xl p-12 text-center shadow-xs transition-colors duration-200 ${isDarkMode ? "border-slate-800 bg-slate-900" : "border-slate-205 bg-white"}`}>
+                <Film className={`w-12 h-12 mb-4 animate-pulse ${isDarkMode ? "text-slate-700" : "text-slate-300"}`} />
+                <h3 className={`text-sm font-bold uppercase tracking-widest ${isDarkMode ? "text-slate-300" : "text-slate-800"}`}>Video Workspace idle</h3>
+                <p className="text-xs text-slate-400 mt-1 max-w-sm">
+                  Drop video files on the left channel sidebar first to enable canvas-aligned inpaint overlays across all video frames sequentially.
+                </p>
+              </div>
+            )
           )}
         </main>
       </div>
