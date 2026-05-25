@@ -1,4 +1,4 @@
-# ClearMark AI 🚀
+# ClearMark 🚀
 ### Intelligent Batch Watermark Remover & High-Performance Image Inpainter
 Created by **nakyoS**
 
